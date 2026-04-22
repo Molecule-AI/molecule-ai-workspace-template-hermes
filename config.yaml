@@ -33,8 +33,13 @@ runtime_config:
       required_env: [OPENROUTER_API_KEY]
 
     # --- MiniMax (direct) — OpenAI-compatible at api.minimax.io/v1 ---
+    # MINIMAX_API_KEY accepts either a pay-as-you-go key (sk-api-*) or a
+    # Token Plan subscription key (sk-cp-*); MiniMax routes by prefix.
     - id: MiniMax-M2.7
       name: MiniMax M2.7 (direct, ~197K ctx, coding-tuned)
+      required_env: [MINIMAX_API_KEY]
+    - id: MiniMax-M2.7-highspeed
+      name: MiniMax M2.7 highspeed (Token Plan only, higher rate limits)
       required_env: [MINIMAX_API_KEY]
     - id: MiniMax-M1
       name: MiniMax M1 (direct, 1M ctx)
