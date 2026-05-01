@@ -179,6 +179,36 @@ runtime_config:
   # are configured — that's the safety net.
   required_env: []
 
+  # providers: declarative list of provider slugs hermes-agent accepts.
+  # Surfaced via the /templates API to the canvas Config tab's
+  # Provider dropdown (Option B PR-5). Each slug must match what
+  # scripts/derive-provider.sh emits — keep this in sync with that
+  # case statement when a new provider is added to the script. Order
+  # is the suggestion order shown in the dropdown; most-common first
+  # so first-time users land on a working choice fast.
+  providers:
+    - nous            # Hermes 4 family via Nous Portal (HERMES_API_KEY)
+    - openrouter      # Hermes 3 + openai/* + anything else (OPENROUTER_API_KEY)
+    - anthropic       # Direct anthropic SDK (ANTHROPIC_API_KEY)
+    - openai          # Direct openai SDK when OPENAI_API_KEY is set
+    - deepseek        # DeepSeek direct
+    - gemini          # Google Gemini
+    - minimax         # MiniMax direct
+    - minimax-cn      # MiniMax China
+    - zai             # Z.AI
+    - alibaba         # Qwen / DashScope
+    - xiaomi          # Xiaomi MiMo
+    - kimi-coding     # Moonshot Kimi
+    - kimi-coding-cn  # Moonshot Kimi China
+    - nvidia          # NVIDIA NIM
+    - huggingface     # Hugging Face inference
+    - ollama-cloud    # Ollama Cloud
+    - ai-gateway      # Generic AI Gateway
+    - kilocode        # Kilocode
+    - opencode-zen    # OpenCode Zen
+    - opencode-go     # OpenCode Go
+    - arcee           # Arcee AI
+
   # 0 = no timeout; hermes-agent sessions can run long when tool-using.
   timeout: 0
 
