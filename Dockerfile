@@ -18,8 +18,22 @@ RUN useradd -u 1000 -m -s /bin/bash agent
 
 # --- Install molecule_runtime (bridge + A2A server) ---
 WORKDIR /app
+
+# RUNTIME_VERSION is forwarded from the reusable publish workflow as a
+# docker build-arg. When set (cascade-triggered builds), it's the exact
+# runtime version PyPI just published. Including it as an ARG changes
+# the cache key for the pip install layer below — without this,
+# identical Dockerfile + identical requirements.txt content would let
+# docker reuse the cached layer with the previous version baked in
+# (the cache trap that bit us 5x on 2026-04-27).
+# Empty default = falls back to whatever requirements.txt resolves to.
+ARG RUNTIME_VERSION=
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && \
+    if [ -n "${RUNTIME_VERSION}" ]; then \
+      pip install --no-cache-dir --upgrade "molecule-ai-workspace-runtime==${RUNTIME_VERSION}"; \
+    fi && \
     python3 -c "import molecule_runtime.preflight as pf; pf.SUPPORTED_RUNTIMES.add('hermes')" && \
     SITE=$(python3 -c 'import molecule_runtime.preflight as p; print(p.__file__)') && \
     sed -i "s/SUPPORTED_RUNTIMES = {/SUPPORTED_RUNTIMES = {'hermes', 'gemini-cli',/" "$SITE"
