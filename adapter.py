@@ -68,6 +68,13 @@ _AUTH_ENV_AUDIT = (
     "OPENCODE_GO_API_KEY",
     "COPILOT_GITHUB_TOKEN",
     "GH_TOKEN",
+    # Custom OpenAI-compatible provider escape hatch. start.sh forwards
+    # HERMES_CUSTOM_BASE_URL + HERMES_CUSTOM_API_KEY + HERMES_CUSTOM_API_MODE
+    # into hermes-agent's .env when PROVIDER=custom. Only the API_KEY is
+    # auth-relevant (BASE_URL + API_MODE are routing config, not secrets);
+    # auditing it lets operators diagnose vLLM / self-hosted / Cerebras
+    # wiring failures from boot logs alone.
+    "HERMES_CUSTOM_API_KEY",
 )
 
 
