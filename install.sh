@@ -244,9 +244,19 @@ fi
 # install.sh continue. The agent boots without A2A MCP tools but the
 # gateway is still healthy.
 MOLECULE_MCP_PYTHON=""
-for candidate in python3 python; do
-  resolved="$(command -v "$candidate" 2>/dev/null || true)"
-  if [ -n "$resolved" ] && "$resolved" -c "import molecule_runtime" >/dev/null 2>&1; then
+# Try the runtime venv first — molecule-ai-workspace-runtime is
+# pip-installed there by the host install.sh, NOT into /usr/bin/python3.
+# Searching `command -v python3` first picks the system interpreter
+# which has only the stdlib and no molecule_runtime, so the wire-up
+# silently no-ops and the agent boots without list_peers (caught live
+# 2026-05-03 on hermes MCP-verify EC2 i-0a2e502add1ee646b).
+for candidate in /opt/molecule-venv/bin/python3 /opt/molecule-venv/bin/python python3 python; do
+  case "$candidate" in
+    /*) resolved="$candidate" ;;
+    *)  resolved="$(command -v "$candidate" 2>/dev/null || true)" ;;
+  esac
+  if [ -n "$resolved" ] && [ -x "$resolved" ] && \
+     "$resolved" -c "import molecule_runtime" >/dev/null 2>&1; then
     MOLECULE_MCP_PYTHON="$resolved"
     break
   fi
