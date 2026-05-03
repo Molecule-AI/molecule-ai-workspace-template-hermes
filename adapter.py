@@ -15,9 +15,82 @@ docs/PLANNING.md for the rewrite rationale.
 """
 from __future__ import annotations
 
+import logging
 import os
 
 from molecule_runtime.adapters.base import BaseAdapter, AdapterConfig, RuntimeCapabilities
+
+logger = logging.getLogger(__name__)
+
+
+# Auth env names to audit at boot. Order is informational; presence/absence
+# of each is logged so the operator can see at a glance which key the
+# workspace was started with vs which is missing. NEVER log values — just
+# the boolean "set"/"unset" per name.
+#
+# Hermes-agent consumes every per-vendor key DIRECTLY (no projection onto
+# ANTHROPIC_AUTH_TOKEN like claude-code requires), so the audit list
+# enumerates the same per-vendor names that start.sh forwards into
+# hermes-agent's .env. The contrast with claude-code's audit (which
+# includes ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL because that SDK is
+# Anthropic-only) is deliberate — see task #249 reconciliation note.
+#
+# Adding a new vendor: add its env name here AND to start.sh's audit
+# for-loop (the cross-file test in tests/test_adapter_logging.py pins
+# the two lists set-equal).
+_AUTH_ENV_AUDIT = (
+    # Nous Portal + the OpenRouter catch-all (covers any model that
+    # routes through hermes's openrouter provider, including the openai/*
+    # slug fallback).
+    "HERMES_API_KEY",
+    "NOUS_API_KEY",
+    "OPENROUTER_API_KEY",
+    # Direct-SDK providers hermes calls natively.
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GLM_API_KEY",
+    "KIMI_API_KEY",
+    "KIMI_CN_API_KEY",
+    "MINIMAX_API_KEY",
+    "MINIMAX_CN_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "XIAOMI_API_KEY",
+    "ARCEEAI_API_KEY",
+    "NVIDIA_API_KEY",
+    "OLLAMA_API_KEY",
+    "HF_TOKEN",
+    "AI_GATEWAY_API_KEY",
+    "KILOCODE_API_KEY",
+    "OPENCODE_ZEN_API_KEY",
+    "OPENCODE_GO_API_KEY",
+    "COPILOT_GITHUB_TOKEN",
+    "GH_TOKEN",
+)
+
+
+def _audit_auth_env_presence() -> None:
+    """Log a one-line snapshot of which auth env names are set.
+
+    Logs NAMES + presence ("set"/"unset"), never VALUES. Lets an
+    operator reading docker logs answer "is this a missing key
+    problem or a wrong-model problem?" in one glance — paired with
+    start.sh's pre-Python audit (which fires before the gateway
+    spawns), the operator sees the same set of names twice and can
+    correlate "key was present at start.sh, gone by adapter.setup()"
+    if it ever happens.
+
+    Mirrors claude-code's _audit_auth_env_presence (template-claude-code
+    PR #32) but with hermes's per-vendor audit list — hermes has no
+    ANTHROPIC_AUTH_TOKEN/ANTHROPIC_BASE_URL projection layer.
+    """
+    snapshot = ", ".join(
+        f"{name}={'set' if os.environ.get(name) else 'unset'}"
+        for name in _AUTH_ENV_AUDIT
+    )
+    logger.info("auth env audit: %s", snapshot)
 
 
 class HermesAgentAdapter(BaseAdapter):
@@ -117,6 +190,17 @@ class HermesAgentAdapter(BaseAdapter):
         # short-circuit fires after create_executor() returns.
         if os.environ.get("MOLECULE_SMOKE_MODE") == "1":
             return
+
+        # Audit which auth-relevant env vars are present (NAMES ONLY —
+        # never values). Boot-time visibility into "is the key missing
+        # or wrong" is the diagnosis question that bit the 2026-05-02
+        # crash-loop incident in claude-code; ship the same surgical
+        # fix here proactively so a hermes operator with multiple
+        # vendor keys can tell "is MINIMAX_API_KEY visible to my
+        # workspace?" from `docker logs` alone. start.sh logs the same
+        # set as a shell loop pre-gosu; this entry confirms it survived
+        # the privilege drop and got handed to the Python adapter.
+        _audit_auth_env_presence()
 
         try:
             import httpx  # noqa: F401
