@@ -215,6 +215,7 @@ class HermesAgentProxyExecutor(AgentExecutor):
     ) -> None:
         message_id = uuid.uuid4().hex
         chat_id = self._derive_chat_id(context)
+        peer_id, peer_name = self._derive_peer_identity(context, fallback=chat_id)
         callback_url = (
             f"http://{self._callback_host}:{self._callback_port}{_DEFAULT_CALLBACK_PATH}"
         )
@@ -225,8 +226,8 @@ class HermesAgentProxyExecutor(AgentExecutor):
 
         payload = {
             "chat_id": chat_id,
-            "peer_id": chat_id,
-            "peer_name": chat_id,
+            "peer_id": peer_id,
+            "peer_name": peer_name,
             "content": prompt,
             "message_id": message_id,
             "callback_url": callback_url,
@@ -307,6 +308,35 @@ class HermesAgentProxyExecutor(AgentExecutor):
         if not future.done():
             future.set_result(content)
         return web.json_response({"ok": True})
+
+    @staticmethod
+    def _derive_peer_identity(context: RequestContext, *, fallback: str) -> tuple[str, str]:
+        """Pull peer_id + peer_name from the inbound context if the
+        a2a-sdk surfaces them; fall back to the chat_id otherwise.
+
+        peer_id and peer_name are distinct from chat_id — chat_id is
+        the per-conversation key (stable across turns), peer_id is the
+        sending agent's identity (workspace UUID), peer_name is its
+        registered display name. Sending all three equal works for
+        single-tenant proxy use, but downstream plugin logs become
+        unreadable and any peer-routing logic in the plugin would
+        misroute. Look up the actual values when available.
+        """
+        peer_id = fallback
+        peer_name = fallback
+        message = getattr(context, "message", None)
+        if message is not None:
+            for attr in ("peer_id", "sender_id", "from_id"):
+                value = getattr(message, attr, None)
+                if value:
+                    peer_id = str(value)
+                    break
+            for attr in ("peer_name", "sender_name", "from_name"):
+                value = getattr(message, attr, None)
+                if value:
+                    peer_name = str(value)
+                    break
+        return peer_id, peer_name
 
     @staticmethod
     def _derive_chat_id(context: RequestContext) -> str:

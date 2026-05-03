@@ -624,6 +624,53 @@ def test_derive_chat_id_uses_message_id_camelcase():
     assert HermesAgentProxyExecutor._derive_chat_id(ctx) == "msg-camelcase"
 
 
+# ---- peer identity derivation ---------------------------------------
+
+
+def test_derive_peer_identity_falls_back_to_chat_id_when_message_missing():
+    """Single-tenant proxy default: when no peer fields surface, both
+    peer_id and peer_name match the chat_id we already derived."""
+    ctx = MagicMock()
+    ctx.message = None
+    pid, pname = HermesAgentProxyExecutor._derive_peer_identity(
+        ctx, fallback="task-A"
+    )
+    assert pid == "task-A"
+    assert pname == "task-A"
+
+
+def test_derive_peer_identity_picks_up_explicit_peer_fields():
+    """When the a2a-sdk surfaces peer_id / peer_name on the message,
+    use them instead of the chat_id fallback so plugin logs and any
+    future peer-routing logic stay accurate."""
+    ctx = MagicMock()
+    msg = MagicMock(spec=["peer_id", "peer_name"])
+    msg.peer_id = "ws-uuid-7777"
+    msg.peer_name = "researcher-bot"
+    ctx.message = msg
+    pid, pname = HermesAgentProxyExecutor._derive_peer_identity(
+        ctx, fallback="task-A"
+    )
+    assert pid == "ws-uuid-7777"
+    assert pname == "researcher-bot"
+
+
+def test_derive_peer_identity_accepts_legacy_sender_attrs():
+    """If a future a2a-sdk renames peer_id → sender_id, the helper
+    still picks it up. Keeps us forward-compatible with the schema
+    drift the codex template has already documented."""
+    ctx = MagicMock()
+    msg = MagicMock(spec=["sender_id", "from_name"])
+    msg.sender_id = "ws-legacy"
+    msg.from_name = "legacy-bot"
+    ctx.message = msg
+    pid, pname = HermesAgentProxyExecutor._derive_peer_identity(
+        ctx, fallback="fallback"
+    )
+    assert pid == "ws-legacy"
+    assert pname == "legacy-bot"
+
+
 @pytest.mark.asyncio
 async def test_cancel_returns_none():
     """cancel() is a noop today — confirm it doesn't raise and returns
