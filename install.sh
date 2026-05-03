@@ -150,6 +150,28 @@ chmod 600 "$HERMES_HOME/.env"
 # direct openai provider), nousresearch/* → nous-or-openrouter based
 # on keys present, etc.). Explicit HERMES_INFERENCE_PROVIDER in the
 # env always wins.
+# Auto-flip the default model to a MiniMax slug when the operator's
+# only present LLM key is MINIMAX_API_KEY. Without this, the
+# nousresearch/hermes-4-70b default routes to OpenRouter (no
+# OPENROUTER_API_KEY = 401) and the gateway crashes with "No LLM
+# provider configured" on first chat request, which propagates as
+# `[hermes-agent error 500]` on the platform A2A. Caught live during
+# the 4-runtime A2A E2E (2026-05-03). The minimax/* prefix routes
+# directly to hermes's native `minimax` provider via derive-provider.sh.
+# Test against BOTH HERMES_INFERENCE_MODEL (upstream env var) and the
+# legacy HERMES_DEFAULT_MODEL so the auto-flip fires only when neither
+# is set explicitly.
+if [ -z "${HERMES_INFERENCE_MODEL:-}" ] \
+  && [ -z "${HERMES_DEFAULT_MODEL:-}" ] \
+  && [ -n "${MINIMAX_API_KEY:-}" ] \
+  && [ -z "${OPENROUTER_API_KEY:-}" ] \
+  && [ -z "${OPENAI_API_KEY:-}" ] \
+  && [ -z "${HERMES_API_KEY:-}" ] \
+  && [ -z "${NOUS_API_KEY:-}" ] \
+  && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  HERMES_INFERENCE_MODEL="minimax/MiniMax-M2.1"
+  echo "[install.sh] no provider key but MINIMAX_API_KEY set → defaulting to ${HERMES_INFERENCE_MODEL}"
+fi
 # Read BOTH HERMES_INFERENCE_MODEL (upstream's actual env var, see
 # NousResearch/hermes-agent website/docs/reference/environment-variables.md)
 # AND HERMES_DEFAULT_MODEL (legacy name we invented before 2026-05).
