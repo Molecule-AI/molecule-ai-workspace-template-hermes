@@ -230,6 +230,32 @@ if [[ "${HERMES_CUSTOM_BASE_URL:-}" =~ ^https?://api\.openai\.com(/|$) ]]; then
   fi
 fi
 
+# --- Resolve python interpreter that has molecule_runtime ---
+# molecule-ai-workspace-runtime is pip-installed on the host BEFORE this
+# script runs (see install.sh header). The hermes MCP loader spawns the
+# server as a subprocess via `command + args`, so we need an absolute
+# path to a python that can `import molecule_runtime`. Detect at install
+# time so the recorded config.yaml entry survives PATH changes between
+# now and when hermes gateway forks the subprocess.
+#
+# Falls back gracefully when molecule_runtime isn't importable (the
+# template's CI smoke build installs only requirements.txt, not the
+# runtime wheel) — emit a warning, skip the mcp_servers block, and let
+# install.sh continue. The agent boots without A2A MCP tools but the
+# gateway is still healthy.
+MOLECULE_MCP_PYTHON=""
+for candidate in python3 python; do
+  resolved="$(command -v "$candidate" 2>/dev/null || true)"
+  if [ -n "$resolved" ] && "$resolved" -c "import molecule_runtime" >/dev/null 2>&1; then
+    MOLECULE_MCP_PYTHON="$resolved"
+    break
+  fi
+done
+if [ -z "$MOLECULE_MCP_PYTHON" ]; then
+  echo "[install.sh] WARNING: molecule_runtime not importable from any python on PATH;" \
+    "skipping a2a MCP wire-up — hermes agent will boot without list_peers / delegate_task"
+fi
+
 {
   echo "# Seeded by template-hermes install.sh on $(date -u -Iseconds)"
   echo "# Rewritten each boot from HERMES_DEFAULT_MODEL + HERMES_INFERENCE_PROVIDER env."
@@ -248,6 +274,42 @@ fi
   # Emit the field only when explicitly set — absent = hermes auto-detect.
   if [ -n "${HERMES_CUSTOM_API_MODE:-}" ]; then
     echo "  api_mode: \"${HERMES_CUSTOM_API_MODE}\""
+  fi
+  # --- Molecule a2a_mcp_server wire-up (issue #41) ---
+  # Hermes-agent's MCP loader (~/.hermes/hermes-agent/hermes_cli/mcp_config.py)
+  # reads `mcp_servers:` from config.yaml and forks each entry as a stdio
+  # subprocess. We register the platform A2A MCP server (list_peers,
+  # delegate_task, delegate_task_async, check_task_status, get_workspace_info,
+  # commit_memory, recall_memory, send_message_to_user) so the hermes
+  # agent has tool parity with the claude-code template's
+  # claude_sdk_executor.mcp_servers["a2a"] entry.
+  #
+  # The server reads WORKSPACE_ID + PLATFORM_URL + MOLECULE_ORG_ID +
+  # CONFIGS_DIR from env at startup (see molecule_runtime/a2a_client.py
+  # and platform_auth.py). hermes's _build_safe_env (tools/mcp_tool.py)
+  # only forwards a tiny baseline (PATH/HOME/USER/...), so we MUST
+  # explicitly enumerate every var the server needs in the `env:` block
+  # of the entry — variable interpolation against the OUTER process
+  # environment happens at hermes-fork time.
+  #
+  # Idempotency: install.sh unconditionally rewrites this whole config
+  # file each run, so re-running the script overwrites (never duplicates)
+  # the mcp_servers block.
+  if [ -n "${MOLECULE_MCP_PYTHON}" ]; then
+    echo "mcp_servers:"
+    echo "  molecule:"
+    echo "    enabled: true"
+    echo "    command: \"${MOLECULE_MCP_PYTHON}\""
+    echo "    args: [\"-m\", \"molecule_runtime.a2a_mcp_server\"]"
+    echo "    env:"
+    echo "      WORKSPACE_ID: \"${WORKSPACE_ID:-}\""
+    echo "      PLATFORM_URL: \"${PLATFORM_URL:-http://platform:8080}\""
+    if [ -n "${MOLECULE_ORG_ID:-}" ]; then
+      echo "      MOLECULE_ORG_ID: \"${MOLECULE_ORG_ID}\""
+    fi
+    if [ -n "${CONFIGS_DIR:-}" ]; then
+      echo "      CONFIGS_DIR: \"${CONFIGS_DIR}\""
+    fi
   fi
 } >"$HERMES_HOME/config.yaml"
 
