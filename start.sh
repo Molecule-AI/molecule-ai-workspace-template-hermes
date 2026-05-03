@@ -23,6 +23,28 @@ if [ "${MOLECULE_SMOKE_MODE:-0}" = "1" ]; then
   exec molecule-runtime
 fi
 
+# Boot-context auth env audit — emitted on EVERY non-smoke boot, including
+# every restart of a crash-loop. Lets `docker logs` answer "what auth env
+# was actually present?" without having to docker exec into a dying
+# container. Logs NAMES of auth-relevant env vars, never VALUES.
+#
+# Mirrors adapter.py's _AUTH_ENV_AUDIT — keep the two lists in sync
+# (tests/test_adapter_logging.py asserts set-equality so they can't drift).
+# The shell loop fires BEFORE the gateway spawns; the Python adapter logs
+# the same set in its setup() AFTER molecule-runtime boots. An operator
+# diagnosing a wedge can correlate "key present at start.sh, gone in
+# adapter" if the privilege drop ever loses one.
+echo "----- start.sh auth env audit $(date -u +%Y-%m-%dT%H:%M:%SZ) -----"
+for var in HERMES_API_KEY NOUS_API_KEY OPENROUTER_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY GOOGLE_API_KEY DEEPSEEK_API_KEY GLM_API_KEY KIMI_API_KEY KIMI_CN_API_KEY MINIMAX_API_KEY MINIMAX_CN_API_KEY DASHSCOPE_API_KEY XIAOMI_API_KEY ARCEEAI_API_KEY NVIDIA_API_KEY OLLAMA_API_KEY HF_TOKEN AI_GATEWAY_API_KEY KILOCODE_API_KEY OPENCODE_ZEN_API_KEY OPENCODE_GO_API_KEY COPILOT_GITHUB_TOKEN GH_TOKEN; do
+  eval "val=\${$var:-}"
+  if [ -n "$val" ]; then
+    echo "[start.sh] env $var=set"
+  else
+    echo "[start.sh] env $var=unset"
+  fi
+done
+echo "------------------------------------------------"
+
 HERMES_HOME="/tmp/.hermes"
 ENV_FILE="${HERMES_HOME}/.env"
 HERMES_CONFIG="${HERMES_HOME}/config.yaml"
