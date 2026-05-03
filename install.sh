@@ -150,8 +150,35 @@ chmod 600 "$HERMES_HOME/.env"
 # direct openai provider), nousresearch/* → nous-or-openrouter based
 # on keys present, etc.). Explicit HERMES_INFERENCE_PROVIDER in the
 # env always wins.
-DEFAULT_MODEL="${HERMES_DEFAULT_MODEL:-nousresearch/hermes-4-70b}"
-HERMES_DEFAULT_MODEL="${DEFAULT_MODEL}" \
+# Auto-flip the default model to a MiniMax slug when the operator's
+# only present LLM key is MINIMAX_API_KEY. Without this, the
+# nousresearch/hermes-4-70b default routes to OpenRouter (no
+# OPENROUTER_API_KEY = 401) and the gateway crashes with "No LLM
+# provider configured" on first chat request, which propagates as
+# `[hermes-agent error 500]` on the platform A2A. Caught live during
+# the 4-runtime A2A E2E (2026-05-03). The minimax/* prefix routes
+# directly to hermes's native `minimax` provider via derive-provider.sh.
+# Test against BOTH HERMES_INFERENCE_MODEL (upstream env var) and the
+# legacy HERMES_DEFAULT_MODEL so the auto-flip fires only when neither
+# is set explicitly.
+if [ -z "${HERMES_INFERENCE_MODEL:-}" ] \
+  && [ -z "${HERMES_DEFAULT_MODEL:-}" ] \
+  && [ -n "${MINIMAX_API_KEY:-}" ] \
+  && [ -z "${OPENROUTER_API_KEY:-}" ] \
+  && [ -z "${OPENAI_API_KEY:-}" ] \
+  && [ -z "${HERMES_API_KEY:-}" ] \
+  && [ -z "${NOUS_API_KEY:-}" ] \
+  && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  HERMES_INFERENCE_MODEL="minimax/MiniMax-M2.1"
+  echo "[install.sh] no provider key but MINIMAX_API_KEY set → defaulting to ${HERMES_INFERENCE_MODEL}"
+fi
+# Read BOTH HERMES_INFERENCE_MODEL (upstream's actual env var, see
+# NousResearch/hermes-agent website/docs/reference/environment-variables.md)
+# AND HERMES_DEFAULT_MODEL (legacy name we invented before 2026-05).
+# Workspace-server still writes the legacy name during the migration
+# window — accepting both keeps existing provisions green.
+DEFAULT_MODEL="${HERMES_INFERENCE_MODEL:-${HERMES_DEFAULT_MODEL:-nousresearch/hermes-4-70b}}"
+HERMES_INFERENCE_MODEL="${DEFAULT_MODEL}" \
   . "$(dirname "$0")/scripts/derive-provider.sh"
 
 # --- OpenAI bridge: PROVIDER=custom + chat_completions api_mode ---
@@ -203,6 +230,42 @@ if [[ "${HERMES_CUSTOM_BASE_URL:-}" =~ ^https?://api\.openai\.com(/|$) ]]; then
   fi
 fi
 
+# --- Resolve python interpreter that has molecule_runtime ---
+# molecule-ai-workspace-runtime is pip-installed on the host BEFORE this
+# script runs (see install.sh header). The hermes MCP loader spawns the
+# server as a subprocess via `command + args`, so we need an absolute
+# path to a python that can `import molecule_runtime`. Detect at install
+# time so the recorded config.yaml entry survives PATH changes between
+# now and when hermes gateway forks the subprocess.
+#
+# Falls back gracefully when molecule_runtime isn't importable (the
+# template's CI smoke build installs only requirements.txt, not the
+# runtime wheel) — emit a warning, skip the mcp_servers block, and let
+# install.sh continue. The agent boots without A2A MCP tools but the
+# gateway is still healthy.
+MOLECULE_MCP_PYTHON=""
+# Try the runtime venv first — molecule-ai-workspace-runtime is
+# pip-installed there by the host install.sh, NOT into /usr/bin/python3.
+# Searching `command -v python3` first picks the system interpreter
+# which has only the stdlib and no molecule_runtime, so the wire-up
+# silently no-ops and the agent boots without list_peers (caught live
+# 2026-05-03 on hermes MCP-verify EC2 i-0a2e502add1ee646b).
+for candidate in /opt/molecule-venv/bin/python3 /opt/molecule-venv/bin/python python3 python; do
+  case "$candidate" in
+    /*) resolved="$candidate" ;;
+    *)  resolved="$(command -v "$candidate" 2>/dev/null || true)" ;;
+  esac
+  if [ -n "$resolved" ] && [ -x "$resolved" ] && \
+     "$resolved" -c "import molecule_runtime" >/dev/null 2>&1; then
+    MOLECULE_MCP_PYTHON="$resolved"
+    break
+  fi
+done
+if [ -z "$MOLECULE_MCP_PYTHON" ]; then
+  echo "[install.sh] WARNING: molecule_runtime not importable from any python on PATH;" \
+    "skipping a2a MCP wire-up — hermes agent will boot without list_peers / delegate_task"
+fi
+
 {
   echo "# Seeded by template-hermes install.sh on $(date -u -Iseconds)"
   echo "# Rewritten each boot from HERMES_DEFAULT_MODEL + HERMES_INFERENCE_PROVIDER env."
@@ -221,6 +284,42 @@ fi
   # Emit the field only when explicitly set — absent = hermes auto-detect.
   if [ -n "${HERMES_CUSTOM_API_MODE:-}" ]; then
     echo "  api_mode: \"${HERMES_CUSTOM_API_MODE}\""
+  fi
+  # --- Molecule a2a_mcp_server wire-up (issue #41) ---
+  # Hermes-agent's MCP loader (~/.hermes/hermes-agent/hermes_cli/mcp_config.py)
+  # reads `mcp_servers:` from config.yaml and forks each entry as a stdio
+  # subprocess. We register the platform A2A MCP server (list_peers,
+  # delegate_task, delegate_task_async, check_task_status, get_workspace_info,
+  # commit_memory, recall_memory, send_message_to_user) so the hermes
+  # agent has tool parity with the claude-code template's
+  # claude_sdk_executor.mcp_servers["a2a"] entry.
+  #
+  # The server reads WORKSPACE_ID + PLATFORM_URL + MOLECULE_ORG_ID +
+  # CONFIGS_DIR from env at startup (see molecule_runtime/a2a_client.py
+  # and platform_auth.py). hermes's _build_safe_env (tools/mcp_tool.py)
+  # only forwards a tiny baseline (PATH/HOME/USER/...), so we MUST
+  # explicitly enumerate every var the server needs in the `env:` block
+  # of the entry — variable interpolation against the OUTER process
+  # environment happens at hermes-fork time.
+  #
+  # Idempotency: install.sh unconditionally rewrites this whole config
+  # file each run, so re-running the script overwrites (never duplicates)
+  # the mcp_servers block.
+  if [ -n "${MOLECULE_MCP_PYTHON}" ]; then
+    echo "mcp_servers:"
+    echo "  molecule:"
+    echo "    enabled: true"
+    echo "    command: \"${MOLECULE_MCP_PYTHON}\""
+    echo "    args: [\"-m\", \"molecule_runtime.a2a_mcp_server\"]"
+    echo "    env:"
+    echo "      WORKSPACE_ID: \"${WORKSPACE_ID:-}\""
+    echo "      PLATFORM_URL: \"${PLATFORM_URL:-http://platform:8080}\""
+    if [ -n "${MOLECULE_ORG_ID:-}" ]; then
+      echo "      MOLECULE_ORG_ID: \"${MOLECULE_ORG_ID}\""
+    fi
+    if [ -n "${CONFIGS_DIR:-}" ]; then
+      echo "      CONFIGS_DIR: \"${CONFIGS_DIR}\""
+    fi
   fi
 } >"$HERMES_HOME/config.yaml"
 

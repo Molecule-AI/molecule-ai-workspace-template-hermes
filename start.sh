@@ -23,6 +23,28 @@ if [ "${MOLECULE_SMOKE_MODE:-0}" = "1" ]; then
   exec molecule-runtime
 fi
 
+# Boot-context auth env audit — emitted on EVERY non-smoke boot, including
+# every restart of a crash-loop. Lets `docker logs` answer "what auth env
+# was actually present?" without having to docker exec into a dying
+# container. Logs NAMES of auth-relevant env vars, never VALUES.
+#
+# Mirrors adapter.py's _AUTH_ENV_AUDIT — keep the two lists in sync
+# (tests/test_adapter_logging.py asserts set-equality so they can't drift).
+# The shell loop fires BEFORE the gateway spawns; the Python adapter logs
+# the same set in its setup() AFTER molecule-runtime boots. An operator
+# diagnosing a wedge can correlate "key present at start.sh, gone in
+# adapter" if the privilege drop ever loses one.
+echo "----- start.sh auth env audit $(date -u +%Y-%m-%dT%H:%M:%SZ) -----"
+for var in HERMES_API_KEY NOUS_API_KEY OPENROUTER_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY GOOGLE_API_KEY DEEPSEEK_API_KEY GLM_API_KEY KIMI_API_KEY KIMI_CN_API_KEY MINIMAX_API_KEY MINIMAX_CN_API_KEY DASHSCOPE_API_KEY XIAOMI_API_KEY ARCEEAI_API_KEY NVIDIA_API_KEY OLLAMA_API_KEY HF_TOKEN AI_GATEWAY_API_KEY KILOCODE_API_KEY OPENCODE_ZEN_API_KEY OPENCODE_GO_API_KEY COPILOT_GITHUB_TOKEN GH_TOKEN HERMES_CUSTOM_API_KEY; do
+  eval "val=\${$var:-}"
+  if [ -n "$val" ]; then
+    echo "[start.sh] env $var=set"
+  else
+    echo "[start.sh] env $var=unset"
+  fi
+done
+echo "------------------------------------------------"
+
 HERMES_HOME="/tmp/.hermes"
 ENV_FILE="${HERMES_HOME}/.env"
 HERMES_CONFIG="${HERMES_HOME}/config.yaml"
@@ -59,7 +81,9 @@ ${HERMES_INFERENCE_PROVIDER:+HERMES_INFERENCE_PROVIDER=${HERMES_INFERENCE_PROVID
 # Auxiliary model defaults — used by vision, web summarization, MoA.
 ${HERMES_AUXILIARY_PROVIDER:+HERMES_AUXILIARY_PROVIDER=${HERMES_AUXILIARY_PROVIDER}}
 # ── Primary inference providers (keyed) ───────────────────────
-${HERMES_API_KEY:+HERMES_API_KEY=${HERMES_API_KEY}}
+# NOTE: HERMES_API_KEY intentionally NOT forwarded — upstream uses it only for
+# the TUI gateway bridge, not as an LLM credential. Provider keys go below
+# (NOUS_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, …).
 ${NOUS_API_KEY:+NOUS_API_KEY=${NOUS_API_KEY}}
 ${OPENROUTER_API_KEY:+OPENROUTER_API_KEY=${OPENROUTER_API_KEY}}
 ${OPENAI_API_KEY:+OPENAI_API_KEY=${OPENAI_API_KEY}}
@@ -105,10 +129,10 @@ chmod 600 "$ENV_FILE"
 # (defaulting to anthropic/claude-opus-4.6 + provider:auto) which
 # doesn't match the workspace's intended model. Our template owns
 # the selection; operators override via HERMES_INFERENCE_PROVIDER
-# + HERMES_DEFAULT_MODEL env, or by editing config.yaml at runtime
+# + HERMES_INFERENCE_MODEL env, or by editing config.yaml at runtime
 # inside the container.
-# Pull HERMES_DEFAULT_MODEL + HERMES_INFERENCE_PROVIDER out of
-# /configs/config.yaml (canvas Config tab values, written by CP
+# Pull HERMES_INFERENCE_MODEL/HERMES_DEFAULT_MODEL + HERMES_INFERENCE_PROVIDER
+# out of /configs/config.yaml (canvas Config tab values, written by CP
 # user-data per task #197). Env-var overrides still win — the helper
 # only sets vars that aren't already set. Sourced for env mutation.
 # Dockerfile COPYs scripts/ to /app/scripts; fall back to /scripts
@@ -131,13 +155,19 @@ LOAD_CONFIG_SCRIPT="/app/scripts/load-workspace-config.sh"
 # provider key (e.g. just MINIMAX_API_KEY) but no explicit model
 # selection — the canvas's "set key, save, send" flow.
 #
-# Fix: when HERMES_DEFAULT_MODEL is unset and HERMES_INFERENCE_PROVIDER
+# Fix: when neither model env var is set and HERMES_INFERENCE_PROVIDER
 # is unset, pick the default model based on which API key is actually
-# present in env. Keeps the behaviour-when-everything-is-set unchanged
-# (operator-supplied HERMES_DEFAULT_MODEL still wins, including the
-# config.yaml-sourced one above). Order below is rough preference
-# (direct providers preferred over OR routing for the same model family).
-if [ -z "${HERMES_DEFAULT_MODEL:-}" ] && [ -z "${HERMES_INFERENCE_PROVIDER:-}" ]; then
+# present in env. Keeps the behaviour-when-everything-is-set unchanged.
+# Order below is rough preference (direct providers preferred over OR
+# routing for the same model family).
+#
+# We accept BOTH HERMES_INFERENCE_MODEL (upstream's actual env var, see
+# NousResearch/hermes-agent website/docs/reference/environment-variables.md)
+# AND HERMES_DEFAULT_MODEL (legacy name we invented before 2026-05).
+# Workspace-server still writes the legacy name during the migration
+# window — accepting both keeps boots green until that's fixed. Once
+# workspace-server switches over, drop the HERMES_DEFAULT_MODEL fallback.
+if [ -z "${HERMES_INFERENCE_MODEL:-}" ] && [ -z "${HERMES_DEFAULT_MODEL:-}" ] && [ -z "${HERMES_INFERENCE_PROVIDER:-}" ]; then
   if   [ -n "${HERMES_API_KEY:-}" ] || [ -n "${NOUS_API_KEY:-}" ]; then
     HERMES_DEFAULT_MODEL="nousresearch/hermes-4-70b"
   elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
@@ -163,17 +193,17 @@ if [ -z "${HERMES_DEFAULT_MODEL:-}" ] && [ -z "${HERMES_INFERENCE_PROVIDER:-}" ]
     # different obscure error).
     HERMES_DEFAULT_MODEL="nousresearch/hermes-4-70b"
   fi
-  echo "[start.sh] HERMES_DEFAULT_MODEL was unset; auto-selected '${HERMES_DEFAULT_MODEL}' from available API keys"
+  echo "[start.sh] no model env was set; auto-selected '${HERMES_DEFAULT_MODEL}' from available API keys"
 fi
 
-DEFAULT_MODEL="${HERMES_DEFAULT_MODEL}"
+DEFAULT_MODEL="${HERMES_INFERENCE_MODEL:-${HERMES_DEFAULT_MODEL}}"
 # Derive provider from model slug prefix — shared with install.sh via
 # scripts/derive-provider.sh so Docker + bare-host paths match.
 # Dockerfile COPYs scripts/ to /app/scripts; fall back to /scripts
 # for dev environments that run start.sh with a different WORKDIR.
 DERIVE_SCRIPT="/app/scripts/derive-provider.sh"
 [ -f "$DERIVE_SCRIPT" ] || DERIVE_SCRIPT="/scripts/derive-provider.sh"
-HERMES_DEFAULT_MODEL="${DEFAULT_MODEL}" . "$DERIVE_SCRIPT"
+HERMES_INFERENCE_MODEL="${DEFAULT_MODEL}" . "$DERIVE_SCRIPT"
 
 # --- OpenAI bridge: custom provider + chat_completions api_mode ---
 # Symmetric with install.sh. See install.sh for the full explanation.
