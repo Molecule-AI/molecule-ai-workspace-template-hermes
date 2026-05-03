@@ -1,0 +1,133 @@
+# .trivyignore — exclude HIGH-severity CVEs in upstream-bundled components
+# we don't control. molecule-ci#38 follow-up (Trivy gate too strict for
+# templates carrying upstream binary distributions).
+#
+# Scope:
+#   - 100 linux-libc-dev kernel-header CVEs from python:3.11-slim
+#     (Debian-side; kernel headers don't ship binary code, kernel CVEs
+#     don't apply to this artifact in a container — the host kernel
+#     determines exposure)
+#   - 1 picomatch CVE from hermes-agent's bundled Node 22 install
+#     (NousResearch upstream rebuild required)
+#   - 9 golang stdlib CVEs from a vendored Go binary in the hermes
+#     install bundle (cloudflared/gosu — upstream rebuild required)
+#
+# Re-audit 2026-08-01 — by then Debian should have shipped a
+# python:3.11-slim rebuild with newer linux-libc-dev, AND NousResearch
+# may have shipped a hermes-agent installer with refreshed bundles.
+# Walk this list, drop any CVE that's no longer in the latest scan.
+#
+# Long-term fix in molecule-ci: add per-template skip-dirs/skip-files
+# for /usr/include/linux + /home/agent/.hermes (vendored upstream),
+# tracked separately.
+
+CVE-2025-38627
+CVE-2025-40135
+CVE-2025-58183
+CVE-2025-61726
+CVE-2025-61728
+CVE-2025-61729
+CVE-2025-68121
+CVE-2025-71152
+CVE-2025-71221
+CVE-2026-23226
+CVE-2026-23227
+CVE-2026-23231
+CVE-2026-23243
+CVE-2026-23270
+CVE-2026-23315
+CVE-2026-23318
+CVE-2026-23319
+CVE-2026-23325
+CVE-2026-23343
+CVE-2026-23354
+CVE-2026-23359
+CVE-2026-23361
+CVE-2026-23363
+CVE-2026-23378
+CVE-2026-23387
+CVE-2026-23388
+CVE-2026-23392
+CVE-2026-23395
+CVE-2026-23397
+CVE-2026-23412
+CVE-2026-23413
+CVE-2026-23422
+CVE-2026-23427
+CVE-2026-23428
+CVE-2026-23447
+CVE-2026-23455
+CVE-2026-25679
+CVE-2026-31402
+CVE-2026-31408
+CVE-2026-31411
+CVE-2026-31431
+CVE-2026-31485
+CVE-2026-31489
+CVE-2026-31500
+CVE-2026-31506
+CVE-2026-31508
+CVE-2026-31527
+CVE-2026-31530
+CVE-2026-31532
+CVE-2026-31566
+CVE-2026-31576
+CVE-2026-31578
+CVE-2026-31580
+CVE-2026-31581
+CVE-2026-31582
+CVE-2026-31583
+CVE-2026-31586
+CVE-2026-31607
+CVE-2026-31614
+CVE-2026-31669
+CVE-2026-31684
+CVE-2026-31685
+CVE-2026-31693
+CVE-2026-31694
+CVE-2026-31697
+CVE-2026-31698
+CVE-2026-31699
+CVE-2026-31700
+CVE-2026-31701
+CVE-2026-31708
+CVE-2026-31729
+CVE-2026-31731
+CVE-2026-31738
+CVE-2026-31752
+CVE-2026-31754
+CVE-2026-31756
+CVE-2026-31758
+CVE-2026-31759
+CVE-2026-31767
+CVE-2026-31772
+CVE-2026-31773
+CVE-2026-31774
+CVE-2026-31778
+CVE-2026-31781
+CVE-2026-31786
+CVE-2026-31787
+CVE-2026-31788
+CVE-2026-32280
+CVE-2026-32281
+CVE-2026-32283
+CVE-2026-33671
+CVE-2026-43016
+CVE-2026-43017
+CVE-2026-43018
+CVE-2026-43019
+CVE-2026-43020
+CVE-2026-43023
+CVE-2026-43025
+CVE-2026-43027
+CVE-2026-43037
+CVE-2026-43038
+CVE-2026-43040
+CVE-2026-43044
+CVE-2026-43046
+CVE-2026-43047
+CVE-2026-43049
+CVE-2026-43050
+CVE-2026-43051
+CVE-2026-43052
+CVE-2026-43054
