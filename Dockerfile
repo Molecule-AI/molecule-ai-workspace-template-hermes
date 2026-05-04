@@ -8,6 +8,30 @@
 # Last resolved: 2026-05-03 (RFC #388 PR-2b).
 FROM python:3.11-slim@sha256:6d85378d88a19cd4d76079817532d62232be95757cb45945a99fec8e8084b9c2
 
+# ─────────────────────────────────────────────────────────────────────
+# CACHE-FRIENDLY LAYER ORDER — read before adding new layers.
+#
+# Layers are ordered slowest-and-most-stable → fastest-and-most-changing.
+# When `cache-from: type=gha` hits, Docker reuses the cached output of a
+# layer iff (a) its command text is identical AND (b) every prior layer
+# was also a cache hit. Any earlier layer that changes invalidates ALL
+# subsequent layers.
+#
+# The expensive layers are:
+#   1. apt-get install (build-essential + Node-tarball xz extractor)
+#   2. pip install -r requirements.txt
+#   3. curl|bash hermes-agent installer (downloads Node 22 ~140 MB +
+#      builds hermes-agent from source, ~2-4 min by itself)
+#   4. pip install hermes fork + platform plugin from git
+#
+# These ~rarely change (only on Dockerfile edits / requirements bumps /
+# fork-ref bumps) so they belong UP TOP. The cheap, high-churn `COPY *.py`
+# layers belong AT THE BOTTOM. Putting the hermes installer below the
+# COPYs caused every adapter.py / executor.py / scripts/ change to bust
+# its cache → 5-12 min publish-image runs (vs 1-3 min for sibling
+# templates). Don't move the COPYs back above the hermes install.
+# ─────────────────────────────────────────────────────────────────────
+
 # System deps:
 #   curl         — hermes installer + loopback health probe in start.sh
 #   ca-certificates — TLS for all the outbound installs
@@ -48,14 +72,12 @@ RUN pip install --no-cache-dir -r requirements.txt && \
       pip install --no-cache-dir --upgrade "molecule-ai-workspace-runtime==${RUNTIME_VERSION}"; \
     fi
 
-COPY adapter.py .
-COPY __init__.py .
-COPY executor.py .
-COPY scripts/ /app/scripts/
-COPY start.sh /usr/local/bin/start.sh
-RUN chmod +x /usr/local/bin/start.sh
-
 # --- Install the real Nous Research hermes-agent as the agent user ---
+# This MUST stay above the COPY *.py layers below (see cache-order
+# rationale at the top of the file). The installer text is fixed —
+# changing the upstream main branch will not invalidate the layer
+# unless you also touch the RUN command itself.
+#
 # The installer lives under the agent's home (~/.hermes, symlinks the
 # `hermes` entrypoint into ~/.local/bin/). Running as root would place
 # it in /root and break discovery.
@@ -96,8 +118,19 @@ RUN /home/agent/.hermes/hermes-agent/venv/bin/python3 -m ensurepip --upgrade && 
     /home/agent/.hermes/hermes-agent/venv/bin/python3 -m pip install --no-cache-dir \
       "git+https://github.com/Molecule-AI/hermes-platform-molecule-a2a.git@${HERMES_PLATFORM_MOLECULE_A2A_REF}#egg=hermes-platform-molecule-a2a"
 
+# ─────────────────────────────────────────────────────────────────────
+# Fast-changing layers — keep at the bottom.
+# Edits to adapter.py / executor.py / scripts/ / start.sh only invalidate
+# from here down (~5-10 s of work) instead of busting the hermes installer.
+# ─────────────────────────────────────────────────────────────────────
 USER root
 WORKDIR /app
+COPY adapter.py .
+COPY __init__.py .
+COPY executor.py .
+COPY scripts/ /app/scripts/
+COPY start.sh /usr/local/bin/start.sh
+RUN chmod +x /usr/local/bin/start.sh
 
 ENV ADAPTER_MODULE=adapter \
     HERMES_API_BASE=http://127.0.0.1:8642/v1 \
