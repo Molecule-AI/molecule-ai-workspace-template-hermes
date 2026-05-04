@@ -15,8 +15,10 @@ docs/PLANNING.md for the rewrite rationale.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
 
 from molecule_runtime.adapters.base import BaseAdapter, AdapterConfig, RuntimeCapabilities
 
@@ -243,17 +245,49 @@ class HermesAgentAdapter(BaseAdapter):
             health_url = base.replace("/v1", "") + "/health"
             err_hint = "Check /var/log/hermes-gateway.log inside the container."
 
+        # Retry the gateway probe with linear backoff up to a configurable
+        # budget. start.sh used to gate `exec molecule-runtime` on the
+        # gateway being healthy; that gate was removed (see start.sh's
+        # "Race molecule-runtime with hermes gateway" block) so this probe
+        # now runs against a still-warming-up gateway. Budget defaults to
+        # 120s which matches the old in-shell wait — operators can shrink
+        # it to fail-fast (development) or extend it (slow first-boot DB
+        # migrations) via HERMES_GATEWAY_READY_BUDGET_SEC.
+        #
         # AsyncClient — sync httpx inside an async setup() can deadlock
         # against an aiohttp server sharing the same event loop (only
         # bites in tests; real deployments separate processes).
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                r = await client.get(health_url)
-                r.raise_for_status()
-        except Exception as exc:  # pragma: no cover
+            budget_sec = int(os.environ.get("HERMES_GATEWAY_READY_BUDGET_SEC", "120"))
+        except ValueError:
+            budget_sec = 120
+        deadline = time.monotonic() + max(budget_sec, 5)
+        last_exc: Exception | None = None
+        attempt = 0
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            while time.monotonic() < deadline:
+                attempt += 1
+                try:
+                    r = await client.get(health_url)
+                    r.raise_for_status()
+                    if attempt > 1:
+                        elapsed = budget_sec - max(0, int(deadline - time.monotonic()))
+                        logger.info(
+                            "hermes gateway probe succeeded after %d attempt(s) (~%ds elapsed)",
+                            attempt, elapsed,
+                        )
+                    last_exc = None
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    if time.monotonic() + 2 >= deadline:
+                        break
+                    await asyncio.sleep(2)
+        if last_exc is not None:  # pragma: no cover
             raise RuntimeError(
-                f"hermes-agent surface not reachable at {health_url}. {err_hint}"
-            ) from exc
+                f"hermes-agent surface not reachable at {health_url} after "
+                f"{attempt} attempt(s) over ~{budget_sec}s. {err_hint}"
+            ) from last_exc
 
     async def create_executor(self, config: AdapterConfig):
         from executor import HermesAgentProxyExecutor
