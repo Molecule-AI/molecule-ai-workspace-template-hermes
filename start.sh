@@ -295,12 +295,43 @@ chown agent:agent "$HERMES_CONFIG"
 # HERMES_HOME above). The hermes binary is on PATH via /home/agent/.local/bin
 # (set in Dockerfile) — that location is read-only under T1 sandbox but
 # binary lookup only needs read.
-# Use bash -c (not -lc) since we no longer want the login-shell HOME-driven
-# defaults; we're explicitly setting PATH + HOME inline.
-nohup gosu agent env HOME=/tmp PATH="/home/agent/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    bash -c "cd /tmp && hermes gateway" \
-    >>"$LOG_FILE" 2>&1 &
-GATEWAY_PID=$!
+# Spawn + supervisor logic lives in scripts/gateway-supervisor.sh — sourced
+# here so the function bodies are testable independently of start.sh's
+# surrounding setup. See gateway-supervisor.sh for the supervisor's
+# restart-cap + rolling-window semantics.
+# Lookup chain handles both production (Dockerfile copies start.sh to
+# /usr/local/bin/ and scripts/ to /app/scripts/) and local dev (running
+# ./start.sh from the repo root).
+# shellcheck source=scripts/gateway-supervisor.sh
+_supervisor_src=""
+_start_dir="$(cd "$(dirname "$0")" && pwd)"
+for _candidate in \
+    "${_start_dir}/scripts/gateway-supervisor.sh" \
+    "${_start_dir}/gateway-supervisor.sh" \
+    "/app/scripts/gateway-supervisor.sh" \
+    "/usr/local/bin/gateway-supervisor.sh"; do
+  if [ -f "${_candidate}" ]; then
+    _supervisor_src="${_candidate}"
+    break
+  fi
+done
+if [ -z "${_supervisor_src}" ]; then
+  echo "[start.sh] FATAL: gateway-supervisor.sh not found. Looked in ${_start_dir}/scripts/, ${_start_dir}/, /app/scripts/, /usr/local/bin/. Image misbuilt?" >&2
+  exit 1
+fi
+# shellcheck source=scripts/gateway-supervisor.sh
+. "${_supervisor_src}"
+spawn_gateway "$LOG_FILE"
+
+# --- Supervise hermes gateway in the background ---
+# Backgrounded subshell polls GATEWAY_PID and respawns on death.
+# Restart cap (default 5 in 300s) prevents tight crash-restart loops on
+# persistent failures (e.g., gateway dying immediately on every spawn
+# because of bad config). The cap is per rolling window — a single
+# transient crash early on doesn't count against a much-later one.
+supervise_gateway "$LOG_FILE" &
+SUPERVISOR_PID=$!
+echo "[start.sh] hermes gateway supervisor backgrounded (pid ${SUPERVISOR_PID}, max_restarts=${HERMES_GATEWAY_MAX_RESTARTS:-5}/${HERMES_GATEWAY_RESTART_WINDOW_SEC:-300}s)"
 
 # --- Race molecule-runtime with hermes gateway ---
 # Previously this script waited up to 120s for hermes-gateway /health
