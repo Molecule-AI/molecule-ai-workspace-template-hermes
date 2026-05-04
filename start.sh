@@ -302,30 +302,27 @@ nohup gosu agent env HOME=/tmp PATH="/home/agent/.local/bin:/usr/local/sbin:/usr
     >>"$LOG_FILE" 2>&1 &
 GATEWAY_PID=$!
 
-# --- Wait for :8642 readiness ---
-# Max 120s — enough for a cold gateway boot including first-time DB
-# migrations and session-store init. Longer waits should surface as a
-# provisioning failure upstream rather than silently holding the container.
-READY_TIMEOUT=120
-for _ in $(seq 1 $READY_TIMEOUT); do
-  if curl -fsS "http://127.0.0.1:${API_SERVER_PORT:-8642}/health" >/dev/null 2>&1; then
-    break
-  fi
-  if ! kill -0 "$GATEWAY_PID" 2>/dev/null; then
-    echo "[start.sh] hermes gateway exited during boot. Last log lines:" >&2
-    tail -40 "$LOG_FILE" >&2
-    exit 1
-  fi
-  sleep 1
-done
-
-if ! curl -fsS "http://127.0.0.1:${API_SERVER_PORT:-8642}/health" >/dev/null 2>&1; then
-  echo "[start.sh] hermes gateway failed to reach /health within ${READY_TIMEOUT}s." >&2
-  tail -80 "$LOG_FILE" >&2
-  exit 1
-fi
-
-echo "[start.sh] hermes gateway ready on :${API_SERVER_PORT:-8642} (pid ${GATEWAY_PID})"
+# --- Race molecule-runtime with hermes gateway ---
+# Previously this script waited up to 120s for hermes-gateway /health
+# before exec'ing molecule-runtime, then exited 1 on timeout. That coupled
+# the workspace's READINESS (`/.well-known/agent-card.json` returning 200)
+# to hermes-gateway being healthy — which itself depends on valid LLM
+# credentials. Result: a workspace launched without MINIMAX/OPENAI/etc.
+# crash-looped silently and `/agent-card` never served, blocking deprovision
+# and giving canvas no actionable signal. Fixed in tandem with molecule-core
+# PR #2756 which decoupled `adapter.setup()` from agent-card mounting.
+#
+# New shape: hermes-gateway runs in the background; molecule-runtime exec's
+# immediately. The Python adapter (`adapter.py:setup()`) probes :8642/health
+# with retry+backoff up to HERMES_GATEWAY_READY_BUDGET_SEC (default 120s).
+# - Healthy gateway → adapter.setup() probe succeeds → DefaultRequestHandler
+#   mounts → agent works as before, with /agent-card served seconds earlier
+#   than the old wait-then-exec path.
+# - Broken gateway → adapter.setup() probe exhausts retries → main.py mounts
+#   the not-configured handler → /agent-card still 200, JSON-RPC returns
+#   `-32603 "agent not configured"` with the gateway-not-reachable error
+#   string, canvas can render a clear error to the user.
+echo "[start.sh] hermes gateway backgrounded (pid ${GATEWAY_PID}); molecule-runtime will probe :${API_SERVER_PORT:-8642}/health on its own retry budget."
 
 # --- Exec molecule-runtime on :8000 ---
 # From here on, every A2A message the platform sends gets proxied
