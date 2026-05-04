@@ -48,11 +48,23 @@ echo "------------------------------------------------"
 HERMES_HOME="/tmp/.hermes"
 ENV_FILE="${HERMES_HOME}/.env"
 HERMES_CONFIG="${HERMES_HOME}/config.yaml"
-LOG_FILE="/tmp/hermes-gateway.log"
-
-mkdir -p "$(dirname "$LOG_FILE")"
-touch "$LOG_FILE"
-chown agent:agent "$LOG_FILE"
+# LOG_FILE lives inside HERMES_HOME so the `install -d -o agent` below
+# is the single source of permission. The earlier
+# `LOG_FILE="/tmp/hermes-gateway.log"` plus `touch + chown` pattern
+# created a race surface: the gateway is spawned under `gosu agent` with
+# the redirect `>>"$LOG_FILE"` parsed by the root parent shell, but the
+# file's effective writability was sensitive to whatever order the
+# touch/chown pair completed in (and which cgroup user-namespace
+# remapping the runtime layered on top). Symptom in production:
+# repeated `start.sh: line 282: /tmp/hermes-gateway.log: Permission
+# denied` followed by `[start.sh] hermes gateway exited during boot`,
+# never reaching agent-card readiness — exactly what bench run
+# 25320395954's hermes job hit on 2026-05-04 after the runtime image
+# pin engaged the containerized path. Putting the log under HERMES_HOME
+# means the agent-owned directory tree contains an agent-owned file,
+# and root's redirect into a directory it owns transitively works
+# regardless of file-vs-directory ownership ordering quirks.
+LOG_FILE="${HERMES_HOME}/gateway.log"
 
 # --- Generate a per-container API_SERVER_KEY ---
 # hermes-agent requires a bearer token on the api-server platform. We
@@ -64,6 +76,12 @@ if [ -z "${API_SERVER_KEY:-}" ]; then
 fi
 
 install -d -o agent -g agent "$HERMES_HOME"
+# Atomic create-with-perms for LOG_FILE — same ownership semantics as
+# HERMES_HOME above. install(1) creates the file in one syscall with
+# mode + owner set, eliminating the touch-then-chown race that bit the
+# old `/tmp/hermes-gateway.log` placement (see comment at LOG_FILE
+# definition above).
+install -m 644 -o agent -g agent /dev/null "$LOG_FILE"
 
 # --- Write hermes-agent's .env ---
 # API_SERVER_ENABLED must be true and the bearer must match. Every
