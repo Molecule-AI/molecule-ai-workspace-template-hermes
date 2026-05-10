@@ -55,6 +55,35 @@ RUN curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/
 # ~/.local/bin/hermes, so ~/.local/bin is the only PATH entry we need.
 ENV PATH="/home/agent/.local/bin:${PATH}"
 
+# --- Install the Molecule A2A channel plugin (hermes-channel-molecule) ---
+# This gives hermes-agent the same A2A MCP tools (list_peers, delegate_task,
+# send_message_to_user, commit_memory, recall_memory) that claude-code
+# and codex runtimes get via their built-in MCP server.
+#
+# The plugin:
+#   1. Spawns `python -m molecule_runtime.a2a_mcp_server` as a stdio
+#      MCP subprocess inside the hermes gateway process.
+#   2. Long-polls the platform inbox (wait_for_message) every turn.
+#   3. Dispatches each inbound canvas message / peer A2A into the
+#      hermes gateway as a MessageEvent — same dispatch path Telegram/
+#      Discord/Slack use.
+#   4. Routes outbound replies via send_message_to_user (canvas) or
+#      delegate_task (peer agent) MCP tool calls.
+#
+# Why hermes-channel-molecule instead of hermes-platform-molecule-a2a:
+#   - hermes-platform-molecule-a2a (HTTP callback) requires a separate
+#     runtime-side callback server; it's designed for in-container
+#     scenarios where molecule-runtime + hermes share the same host.
+#   - hermes-channel-molecule runs the stdio MCP subprocess inside the
+#     hermes gateway itself — no additional server process needed,
+#     self-contained in the plugin.
+#   - Both require the patched hermes fork until upstream PR #18775
+#     merges; channel plugin is the lighter path and matches how
+#     Claude Code gets its MCP tools.
+ARG HERMES_CHANNEL_MOLECULE_REF=main
+RUN /home/agent/.hermes/hermes-agent/venv/bin/python3 -m pip install --no-cache-dir \
+      "git+https://git.moleculesai.app/molecule-ai/hermes-channel-molecule.git@${HERMES_CHANNEL_MOLECULE_REF}#egg=hermes-channel-molecule"
+
 # --- Molecule A2A platform plugin (post-demo: native push parity) ---
 # Two refs are installed into the same venv that the upstream installer
 # created above:

@@ -41,6 +41,20 @@ if [ -z "${API_SERVER_KEY:-}" ]; then
   export API_SERVER_KEY
 fi
 
+# --- Read workspace token for hermes-channel-molecule MCP subprocess ---
+# The platform writes the per-workspace bearer token to /configs/.auth_token
+# on provision. hermes-channel-molecule's MCP subprocess (inside the hermes
+# gateway process) needs MOLECULE_WORKSPACE_TOKEN in env — the hermes venv's
+# python doesn't share the molecule-runtime's token cache, so we pass it
+# through the hermes .env file which gets loaded by the gateway daemon.
+if [ -z "${MOLECULE_WORKSPACE_TOKEN:-}" ] && [ -f /configs/.auth_token ]; then
+  _tok="$(cat /configs/.auth_token 2>/dev/null | tr -d ' \n')"
+  if [ -n "$_tok" ]; then
+    export MOLECULE_WORKSPACE_TOKEN="$_tok"
+    echo "[start.sh] MOLECULE_WORKSPACE_TOKEN resolved from /configs/.auth_token"
+  fi
+fi
+
 install -d -o agent -g agent "$HERMES_HOME"
 
 # --- Write hermes-agent's .env ---
@@ -50,6 +64,7 @@ install -d -o agent -g agent "$HERMES_HOME"
 # authoritative list. Adding a new key here also needs a matching
 # required_env entry in config.yaml.
 cat >"$ENV_FILE" <<EOF
+MOLECULE_WORKSPACE_TOKEN=${MOLECULE_WORKSPACE_TOKEN:-}
 API_SERVER_ENABLED=true
 API_SERVER_KEY=${API_SERVER_KEY}
 API_SERVER_HOST=${API_SERVER_HOST:-127.0.0.1}
@@ -220,7 +235,18 @@ fi
   if [ -n "${HERMES_CUSTOM_API_MODE:-}" ]; then
     echo "  api_mode: \"${HERMES_CUSTOM_API_MODE}\""
   fi
-  # --- Molecule A2A platform plugin ---
+  # --- Molecule A2A channel plugin (MCP tools for hermes) ---
+  # hermes-channel-molecule gives hermes the same A2A MCP tools
+  # (list_peers, delegate_task, send_message_to_user, commit_memory,
+  # recall_memory) that claude-code and codex runtimes get natively.
+  # Installed in Dockerfile; configured here so the gateway discovers
+  # and connects it on startup.
+  echo "  # Molecule A2A channel plugin (MCP stdio subprocess)"
+  echo "  gateway:"
+  echo "    platforms:"
+  echo "      molecule:"
+  echo "        enabled: true"
+  # --- Molecule A2A platform plugin (native push via HTTP callback) ---
   # Loaded into hermes via the hermes_agent.plugins entry point baked
   # into the image (see Dockerfile). When enabled, hermes opens a
   # localhost HTTP listener on MOLECULE_A2A_PLATFORM_PORT; molecule-runtime
@@ -229,21 +255,17 @@ fi
   # on :8642 — both run side-by-side. The runtime adapter still uses
   # the api-server bridge today; switching to the plugin path is a
   # separate adapter.py change (post-demo).
-  if [ "${MOLECULE_A2A_PLATFORM_ENABLED:-true}" = "true" ]; then
-    # Default the plugin's callback URL to the executor's reply
-    # server (started by adapter.create_executor → executor.start()).
-    # Operators can pin a custom URL via env if molecule-runtime is
-    # extended to host /a2a/reply itself.
+  if [ "${MOLECULE_A2A_PLATFORM_ENABLED:-false}" = "true" ]; then
     DEFAULT_CALLBACK="http://${MOLECULE_A2A_CALLBACK_HOST:-127.0.0.1}:${MOLECULE_A2A_CALLBACK_PORT:-8646}/a2a/reply"
-    echo "platforms:"
-    echo "  molecule-a2a:"
-    echo "    enabled: true"
-    echo "    extra:"
-    echo "      host: \"${MOLECULE_A2A_PLATFORM_HOST:-127.0.0.1}\""
-    echo "      port: ${MOLECULE_A2A_PLATFORM_PORT:-8645}"
-    echo "      callback_url: \"${MOLECULE_A2A_PLATFORM_CALLBACK_URL:-${DEFAULT_CALLBACK}}\""
+    echo "  platforms:"
+    echo "    molecule-a2a:"
+    echo "      enabled: true"
+    echo "      extra:"
+    echo "        host: \"${MOLECULE_A2A_PLATFORM_HOST:-127.0.0.1}\""
+    echo "        port: ${MOLECULE_A2A_PLATFORM_PORT:-8645}"
+    echo "        callback_url: \"${MOLECULE_A2A_PLATFORM_CALLBACK_URL:-${DEFAULT_CALLBACK}}\""
     if [ -n "${MOLECULE_A2A_PLATFORM_SHARED_SECRET:-}" ]; then
-      echo "      shared_secret: \"${MOLECULE_A2A_PLATFORM_SHARED_SECRET}\""
+      echo "        shared_secret: \"${MOLECULE_A2A_PLATFORM_SHARED_SECRET}\""
     fi
   fi
 } >"$HERMES_CONFIG"
