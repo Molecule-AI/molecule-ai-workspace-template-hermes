@@ -242,11 +242,64 @@ fi
     echo "      host: \"${MOLECULE_A2A_PLATFORM_HOST:-127.0.0.1}\""
     echo "      port: ${MOLECULE_A2A_PLATFORM_PORT:-8645}"
     echo "      callback_url: \"${MOLECULE_A2A_PLATFORM_CALLBACK_URL:-${DEFAULT_CALLBACK}}\""
+    echo "      platform_url: \"${PLATFORM_URL:-${MOLECULE_PLATFORM_URL:-http://platform:8080}}\""
+    echo "      workspace_id: \"${WORKSPACE_ID:-${MOLECULE_WORKSPACE_ID}}\""
     if [ -n "${MOLECULE_A2A_PLATFORM_SHARED_SECRET:-}" ]; then
       echo "      shared_secret: \"${MOLECULE_A2A_PLATFORM_SHARED_SECRET}\""
     fi
   fi
 } >"$HERMES_CONFIG"
+chown agent:agent "$HERMES_CONFIG"
+
+# --- Molecule platform MCP tools (list_peers, delegate_task, etc.) ---
+# The a2a_mcp_server.py HTTP transport exposes platform A2A tools as MCP
+# tools. hermes-agent (MCP-native) connects to this server to access
+# platform primitives it couldn't reach natively:
+#   list_peers, delegate_task, delegate_task_async, check_task_status,
+#   send_message_to_user, commit_memory, recall_memory, get_workspace_info.
+#
+# The server runs as a subprocess under the agent user. WORKSPACE_ID and
+# PLATFORM_URL are inherited from the container env (set by molecule-core
+# workspace provisioner). The hermes config's mcpServers block tells
+# hermes-agent where to connect.
+MCP_SERVER_PORT=${MOLECULE_MCP_SERVER_PORT:-9100}
+MCP_SERVER_LOG="/tmp/a2a-mcp-server.log"
+echo "[start.sh] launching platform MCP server on :${MCP_SERVER_PORT}"
+nohup gosu agent env HOME=/tmp \
+    python3 -m molecule_runtime.a2a_mcp_server \
+        --transport=http --port="${MCP_SERVER_PORT}" \
+    >"$MCP_SERVER_LOG" 2>&1 &
+MCP_SERVER_PID=$!
+
+# Wait for MCP server to be ready (it listens on /health)
+MCP_READY_TIMEOUT=30
+for _ in $(seq 1 $MCP_READY_TIMEOUT); do
+  if curl -fsS "http://127.0.0.1:${MCP_SERVER_PORT}/health" >/dev/null 2>&1; then
+    break
+  fi
+  if ! kill -0 "$MCP_SERVER_PID" 2>/dev/null; then
+    echo "[start.sh] MCP server (pid ${MCP_SERVER_PID}) exited during boot." >&2
+    tail -20 "$MCP_SERVER_LOG" >&2
+    exit 1
+  fi
+  sleep 1
+done
+if ! curl -fsS "http://127.0.0.1:${MCP_SERVER_PORT}/health" >/dev/null 2>&1; then
+  echo "[start.sh] MCP server failed to reach /health within ${MCP_READY_TIMEOUT}s." >&2
+  tail -20 "$MCP_SERVER_LOG" >&2
+  exit 1
+fi
+echo "[start.sh] platform MCP server ready on :${MCP_SERVER_PORT}"
+
+# Add mcp_servers to hermes config (appended after the platforms: block).
+# hermes-agent reads mcpServers from its config.yaml and connects to each
+# server at startup. The molecule-platform server provides A2A team tools.
+{
+  echo "mcpServers:"
+  echo "  molecule-platform:"
+  echo "    url: \"http://127.0.0.1:${MCP_SERVER_PORT}/mcp\""
+  echo "    transport: http"
+} >>"$HERMES_CONFIG"
 chown agent:agent "$HERMES_CONFIG"
 
 # --- Start hermes gateway in the background ---
