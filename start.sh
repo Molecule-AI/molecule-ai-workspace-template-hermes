@@ -27,10 +27,88 @@ HERMES_HOME="/tmp/.hermes"
 ENV_FILE="${HERMES_HOME}/.env"
 HERMES_CONFIG="${HERMES_HOME}/config.yaml"
 LOG_FILE="/tmp/hermes-gateway.log"
+MCP_SERVER_LOG="/tmp/a2a-mcp-server.log"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 touch "$LOG_FILE"
 chown agent:agent "$LOG_FILE"
+
+# --- Start platform MCP server (HTTP transport) ---
+# a2a_mcp_server.py exposes list_peers, delegate_task, send_message_to_user,
+# commit_memory, recall_memory as MCP tools. hermes-agent (MCP-native) connects
+# to it as a client so these tools are available inside the agent session.
+#
+# Without this, Hermes workspaces have no access to platform delegation tools —
+# list_peers / delegate_task silently return "not available" (Issue #157).
+#
+# The HTTP transport was designed for this but never wired up. Start it as a
+# background daemon before hermes-agent boots so the agent can connect on startup.
+# molecule-runtime's main.py does NOT start this server (it only runs the A2A
+# bridge on :8000); the MCP server lifecycle lives entirely in start.sh.
+if [ "${MOLECULE_SMOKE_MODE:-0}" != "1" ]; then
+  MCP_PORT="${MOLECULE_MCP_PORT:-9100}"
+
+  # Resolve a2a_mcp_server.py from the installed molecule_runtime package.
+  # _default_mcp_server_path() in executor_helpers.py uses the same lookup;
+  # keep in sync. Fallback chain: package → legacy /app path → fail.
+  _mcp_script=$(python3 -c "
+import os, sys
+try:
+    from molecule_runtime import a2a_mcp_server as _m
+    p = getattr(_m, '__file__', None)
+    if p and os.path.isfile(p):
+        print(p); sys.exit(0)
+except Exception:
+    pass
+print('/app/a2a_mcp_server.py')  # legacy fallback
+" 2>/dev/null) || _mcp_script="/app/a2a_mcp_server.py"
+
+  if [ -f "$_mcp_script" ]; then
+    mkdir -p "$(dirname "$MCP_SERVER_LOG")"
+    touch "$MCP_SERVER_LOG"
+    chown agent:agent "$MCP_SERVER_LOG"
+
+    # Run as agent user, same privilege level as hermes-agent itself.
+    # PYTHONPATH must include the package root so absolute imports in
+    # a2a_mcp_server.py resolve correctly (e.g. from molecule_runtime import ...).
+    _pkg_root=$(python3 -c "
+import os, sys
+try:
+    from molecule_runtime import a2a_mcp_server as _m
+    print(os.path.dirname(os.path.dirname(os.path.abspath(_m.__file__))))
+except Exception:
+    print('/app')
+" 2>/dev/null) || _pkg_root="/app"
+
+    nohup gosu agent env \
+        HOME=/tmp \
+        PATH="/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+        PYTHONPATH="${_pkg_root}:${PYTHONPATH:-}" \
+        PYTHONPATH="${_pkg_root}" \
+        python3 "$_mcp_script" --transport http --port "$MCP_PORT" \
+        >>"$MCP_SERVER_LOG" 2>&1 &
+
+    _mcp_pid=$!
+    echo "[start.sh] a2a-mcp-server started (pid ${_mcp_pid}, port ${MCP_PORT})"
+
+    # Wait for the HTTP server to be ready (max 15s)
+    _mcp_ready=0
+    for _i in $(seq 1 15); do
+      if curl -sf "http://127.0.0.1:${MCP_PORT}/health" >/dev/null 2>&1; then
+        _mcp_ready=1
+        break
+      fi
+      sleep 1
+    done
+    if [ "$_mcp_ready" = "1" ]; then
+      echo "[start.sh] a2a-mcp-server ready on :${MCP_PORT}"
+    else
+      echo "[start.sh] WARNING: a2a-mcp-server did not become ready within 15s — check ${MCP_SERVER_LOG}"
+    fi
+  else
+    echo "[start.sh] WARNING: a2a_mcp_server.py not found at ${_mcp_script} — platform MCP tools will not be available"
+  fi
+fi
 
 # --- Generate a per-container API_SERVER_KEY ---
 # hermes-agent requires a bearer token on the api-server platform. We

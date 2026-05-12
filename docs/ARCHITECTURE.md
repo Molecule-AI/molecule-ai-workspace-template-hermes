@@ -12,6 +12,10 @@
 │   :8642  → hermes-agent gateway (OpenAI-compat API)       │
 │            running as user `agent`, state in ~/.hermes    │
 │                                                           │
+│   :9100  ← a2a_mcp_server (HTTP transport, platform      │
+│            delegation tools: list_peers, delegate_task,    │
+│            send_message_to_user, commit/recall_memory)     │
+│                                                           │
 └───────────────────────────────────────────────────────────┘
             ▲
             │  (only :8000 exposed outside)
@@ -24,11 +28,18 @@
   hermes, etc.).
 - **`:8642`** — hermes-agent's OpenAI-compatible HTTP API. Loopback
   only. Never routed outside the container.
+- **`:9100`** — Platform MCP server (`a2a_mcp_server.py` HTTP transport).
+  Loopback only. hermes-agent connects as an MCP client to access
+  `list_peers`, `delegate_task`, `send_message_to_user`,
+  `commit_memory`, `recall_memory`. Configurable via `MOLECULE_MCP_PORT`.
 
 ## Boot sequence
 
 `start.sh` (runs as root inside the container):
 
+0. **Skip MCP server in smoke mode.** When `MOLECULE_SMOKE_MODE=1`
+   (publish-image smoke test), exec `molecule-runtime` immediately without
+   starting the gateway or MCP server.
 1. Generate a random `API_SERVER_KEY` if the env var isn't already
    set. This is hermes-agent's bearer token; the executor reads it
    from the env at request time.
@@ -40,12 +51,22 @@
    - Any provider keys present in the container env (`HERMES_API_KEY`,
      `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
      `GEMINI_API_KEY`, `MINIMAX_API_KEY`) forwarded through.
-3. Launch `hermes gateway` in the background as user `agent` via
+3. **Start platform MCP server** (`a2a_mcp_server.py --transport http`)
+   as a background daemon on `127.0.0.1:${MOLECULE_MCP_PORT:-9100}`.
+   This exposes the platform delegation tools (`list_peers`,
+   `delegate_task`, `send_message_to_user`, `commit_memory`,
+   `recall_memory`) as an MCP server. hermes-agent (MCP-native)
+   connects to it as a client so these tools are available inside
+   agent sessions. Skipped when `MOLECULE_SMOKE_MODE=1`. Port is
+   configurable via `MOLECULE_MCP_PORT`. Resolves the script path
+   from the installed `molecule_runtime` package. Waits up to 15s
+   for the `/health` endpoint to respond before proceeding.
+4. Launch `hermes gateway` in the background as user `agent` via
    `sudo -u agent -E bash -lc 'hermes gateway'`. Logs → `/var/log/hermes-gateway.log`.
-4. Poll `http://127.0.0.1:8642/health` up to 60×1s. Fail loud on
+5. Poll `http://127.0.0.1:8642/health` up to 60×1s. Fail loud on
    timeout — dumps last 80 log lines to stderr so provisioning logs
    capture the reason.
-5. `exec molecule-runtime` — replaces the shell, becoming PID 1.
+6. `exec molecule-runtime` — replaces the shell, becoming PID 1.
    molecule-runtime loads `Adapter = HermesAgentAdapter` from
    `__init__.py` and starts the A2A server on `:8000`.
 
