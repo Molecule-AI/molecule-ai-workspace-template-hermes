@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# Boot both processes inside the workspace container:
-#   1. The real hermes-agent gateway with the OpenAI-compat API server
+# Boot three processes inside the workspace container:
+#   1. hermes-agent gateway with the OpenAI-compat API server
 #      platform enabled, listening on 127.0.0.1:8642.
-#   2. molecule-runtime (our A2A server + bridge adapter) on :8000.
+#   2. molecule-runtime A2A MCP server (HTTP transport) on :9100 —
+#      exposes platform tools (list_peers, delegate_task,
+#      send_message_to_user, commit_memory, recall_memory) so the
+#      hermes agent can call them. Fixes #157: hermes workspaces
+#      could not see peers or delegate tasks to teammates because
+#      the MCP server was not running.
+#   3. molecule-runtime (our A2A server + bridge adapter) on :8000.
 #
-# The two talk over loopback. The platform only exposes :8000 — the
-# hermes-agent API is an internal implementation detail and never
-# reachable from outside the container.
+# Processes 2 and 3 talk to the platform over loopback. The platform
+# only exposes :8000 — the hermes-agent API and MCP server are internal
+# implementation details and never reachable from outside the container.
 
 set -euo pipefail
 
@@ -286,6 +292,34 @@ if ! curl -fsS "http://127.0.0.1:${API_SERVER_PORT:-8642}/health" >/dev/null 2>&
 fi
 
 echo "[start.sh] hermes gateway ready on :${API_SERVER_PORT:-8642} (pid ${GATEWAY_PID})"
+
+# --- Start molecule-runtime A2A MCP server (HTTP transport) ---
+# Exposes platform tools (list_peers, delegate_task, send_message_to_user,
+# commit_memory, recall_memory) so the hermes agent can call them via
+# MCP. The server reads WORKSPACE_ID and PLATFORM_URL from env (set by
+# the container's -e flags) and the auth token from /configs/.auth_token
+# (written by molecule-runtime during registration). It starts as a
+# background daemon so it doesn't block the molecule-runtime main process.
+#
+# Skip in smoke mode: the MCP server validates WORKSPACE_ID at import time
+# and makes outbound platform calls during startup health-check, neither
+# of which work with stub credentials.
+if [ "${MOLECULE_SMOKE_MODE:-0}" != "1" ]; then
+  # Guard: WORKSPACE_ID must be set for platform_auth to validate at import.
+  # The container receives it via Docker -e from the provisioner; skip MCP start
+  # if it somehow ended up empty rather than crashing the subprocess.
+  if [ -z "${WORKSPACE_ID:-}" ]; then
+    echo "[start.sh] WARNING: WORKSPACE_ID not set — skipping A2A MCP server start" >&2
+  else
+    MCP_LOG="/tmp/mcp-server.log"
+    nohup python -m molecule_runtime.a2a_mcp_server \
+      --transport http \
+      --port 9100 \
+      >>"$MCP_LOG" 2>&1 &
+    MCP_PID=$!
+    echo "[start.sh] A2A MCP server started on :9100 (pid ${MCP_PID}) — log: ${MCP_LOG}"
+  fi
+fi
 
 # --- Exec molecule-runtime on :8000 ---
 # From here on, every A2A message the platform sends gets proxied

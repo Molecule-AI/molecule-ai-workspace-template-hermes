@@ -18,6 +18,17 @@ workspace with the hermes runtime.
 |---|---|
 | `config.yaml` | Runtime configuration: schema version, model, runtime (hermes), event routing, skill paths, env-var bindings |
 | `adapter.py` | Event-loop adapter for the hermes runtime. Manages the agent lifecycle, routes inbound events, streams responses, and forwards HEARTBEAT events to the platform |
+| `start.sh` | Container entrypoint. Boots hermes gateway, the A2A MCP HTTP server (`:9100`), and molecule-runtime. See §Startup Sequence below. |
+
+### Startup Sequence
+
+`start.sh` launches three processes in this order:
+
+1. **hermes gateway** (as `agent` user, background) — the Nous Research agent daemon. Runs the LLM pipeline, session management, and native tools. Listens on `:8642`.
+2. **molecule-runtime A2A MCP server** (background, as root) — `python -m molecule_runtime.a2a_mcp_server --transport http --port 9100`. Exposes platform tools (`list_peers`, `delegate_task`, `send_message_to_user`, `commit_memory`, `recall_memory`) as an MCP HTTP server. Hermes agents discover it via their MCP client configuration.
+3. **molecule-runtime A2A server** (`exec`, as root) — the main process. Bridges the platform's A2A protocol to the hermes gateway on `:8642`. Also handles heartbeat and workspace registration.
+
+The MCP server (step 2) is what enables Hermes workspaces to see peers and delegate tasks — it is the MCP client side of the platform A2A mesh. Without it, Hermes workspaces can only receive inbound messages, not send outbound delegation calls.
 | `system-prompt.md` | System-level instructions injected into every agent turn (identity, goals, output format, safety guardrails) |
 | `requirements.txt` | Python dependencies (hermes SDK, platform client, LLM client, async utilities) |
 | `Dockerfile` | Container image definition for the hermes runtime environment |

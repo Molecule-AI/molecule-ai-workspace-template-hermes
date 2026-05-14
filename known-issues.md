@@ -6,6 +6,33 @@ affected versions, workaround, and (where applicable) a tracker reference.
 
 ---
 
+## 0. Hermes Workspaces Cannot Use Platform MCP Tools
+
+**Status:** ✅ **RESOLVED** (template-hermes, 2026-05-14)
+
+Hermes workspaces could not call platform A2A tools (`list_peers`, `delegate_task`,
+`delegate_task_async`, `check_task_status`, `send_message_to_user`, `commit_memory`,
+`recall_memory`). The Hermes agent's replies to "Can you see your colleagues?" stated it
+could not see other workspaces — every conversation was an isolated session.
+
+**Root cause:**
+`start.sh` did not start the `a2a_mcp_server.py` HTTP transport. The
+`molecule-ai-workspace-runtime` package was installed (providing the MCP server
+binary) but it was never launched, so Hermes had no MCP client to call the
+platform's MCP bridge at `/workspaces/:id/mcp`.
+
+**Fix:**
+`start.sh` now starts `python -m molecule_runtime.a2a_mcp_server --transport http
+--port 9100` as a background daemon immediately after the hermes gateway reaches
+readiness, before the molecule-runtime A2A server takes the foreground. The server
+reads `WORKSPACE_ID` and `PLATFORM_URL` from the container environment and the
+auth token from `/configs/.auth_token` (written by molecule-runtime at
+registration time).
+
+**Template change:** `runtime/hermes-mcp-server` branch, `start.sh`.
+
+---
+
 ## 1. Hermes Version Mismatch Causes Event Loop to Exit Prematurely
 
 **Severity:** High
